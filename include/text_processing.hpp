@@ -23,6 +23,10 @@ namespace text_processing
 
     std::string englishCleaners2(const std::string& text);
 
+    bool englishPhonemizerAvailable();
+
+    std::string phonemizeEnglish(const std::string& text);
+
     std::string expandAbbreviations(const std::string& text);
 
     std::string expandNumbers(const std::string& text);

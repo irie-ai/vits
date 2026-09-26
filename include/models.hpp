@@ -218,11 +218,11 @@ namespace models
         int64_t ginChannels_;
         int64_t numKernels_;
         int64_t numUpsamples_;
-        torch::nn::Conv1d convPre_{nullptr};
-        std::vector<torch::nn::ConvTranspose1d> ups_;
+        modules::NormalizedConv1d convPre_{nullptr};
+        std::vector<modules::NormalizedConvTranspose1d> ups_;
         std::vector<modules::ResBlock1> resblocks1_;
         std::vector<modules::ResBlock2> resblocks2_;
-        torch::nn::Conv1d convPost_{nullptr};
+        modules::NormalizedConv1d convPost_{nullptr};
         torch::nn::Conv1d cond_{nullptr};
     };
     TORCH_MODULE(Generator);
@@ -245,8 +245,8 @@ namespace models
         int64_t kernelSize_;
         int64_t stride_;
         bool useSpectralNorm_;
-        std::vector<torch::nn::Conv2d> convs_;
-        torch::nn::Conv2d convPost_{nullptr};
+        std::vector<modules::NormalizedConv2d> convs_;
+        modules::NormalizedConv2d convPost_{nullptr};
     };
     TORCH_MODULE(DiscriminatorP);
 
@@ -259,8 +259,8 @@ namespace models
 
     private:
         bool useSpectralNorm_;
-        std::vector<torch::nn::Conv1d> convs_;
-        torch::nn::Conv1d convPost_{nullptr};
+        std::vector<modules::NormalizedConv1d> convs_;
+        modules::NormalizedConv1d convPost_{nullptr};
     };
     TORCH_MODULE(DiscriminatorS);
 

@@ -15,6 +15,43 @@ namespace
         }
     }
 
+    bool hasNamedParameter(torch::nn::Module& module, const std::string& namePart)
+    {
+        for (auto& parameter : module.named_parameters())
+        {
+            if (parameter.key().find(namePart) != std::string::npos)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void testNormalizedConv()
+    {
+        modules::NormalizedConv1d weightNormConv(4, 8, 3, 1, 1);
+        auto x1 = torch::randn({2, 4, 6});
+        auto y1 = weightNormConv->forward(x1);
+        expectTrue(y1.sizes() == torch::IntArrayRef({2, 8, 6}), "NormalizedConv1d keeps expected shape");
+        expectTrue(hasNamedParameter(*weightNormConv, "weight_v"), "NormalizedConv1d registers weight_v");
+        expectTrue(hasNamedParameter(*weightNormConv, "weight_g"), "NormalizedConv1d registers weight_g");
+
+        modules::NormalizedConv2d spectralConv(
+            1,
+            4,
+            std::vector<int64_t>{3, 1},
+            std::vector<int64_t>{1, 1},
+            std::vector<int64_t>{1, 0},
+            std::vector<int64_t>{1, 1},
+            1,
+            true,
+            modules::NormType::Spectral);
+        auto x2 = torch::randn({2, 1, 8, 3});
+        auto y2 = spectralConv->forward(x2);
+        expectTrue(y2.sizes() == torch::IntArrayRef({2, 4, 8, 3}), "NormalizedConv2d spectral keeps expected shape");
+        expectTrue(hasNamedParameter(*spectralConv, "weight_v"), "NormalizedConv2d registers weight_v");
+    }
+
     void testLayerNorm()
     {
         modules::LayerNorm norm(4);
@@ -39,6 +76,8 @@ namespace
         auto mask = torch::ones({2, 1, 6});
         auto y = block->forward(x, mask);
         expectTrue(y.sizes() == x.sizes(), "DDSConv keeps shape");
+        expectTrue(hasNamedParameter(*block, "weight_v"), "DDSConv registers normalized conv weights");
+        expectTrue(hasNamedParameter(*block, "weight_g"), "DDSConv registers weight norm scales");
     }
 
     void testWN()
@@ -48,6 +87,8 @@ namespace
         auto mask = torch::ones({2, 1, 6});
         auto y = block->forward(x, mask);
         expectTrue(y.sizes() == x.sizes(), "WN keeps shape");
+        expectTrue(hasNamedParameter(*block, "weight_v"), "WN registers normalized conv weights");
+        expectTrue(hasNamedParameter(*block, "weight_g"), "WN registers weight norm scales");
     }
 
     void testResBlocks()
@@ -58,10 +99,12 @@ namespace
         modules::ResBlock1 block1(4);
         auto y1 = block1->forward(x, mask);
         expectTrue(y1.sizes() == x.sizes(), "ResBlock1 keeps shape");
+        expectTrue(hasNamedParameter(*block1, "weight_v"), "ResBlock1 registers normalized conv weights");
 
         modules::ResBlock2 block2(4);
         auto y2 = block2->forward(x, mask);
         expectTrue(y2.sizes() == x.sizes(), "ResBlock2 keeps shape");
+        expectTrue(hasNamedParameter(*block2, "weight_v"), "ResBlock2 registers normalized conv weights");
     }
 
     void testFlowLikeModules()
@@ -124,6 +167,7 @@ int main()
     try
     {
         torch::manual_seed(1234);
+        testNormalizedConv();
         testLayerNorm();
         testConvReluNorm();
         testDDSConv();

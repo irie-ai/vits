@@ -15,6 +15,18 @@ namespace
         }
     }
 
+    bool hasNamedParameter(torch::nn::Module& module, const std::string& namePart)
+    {
+        for (auto& parameter : module.named_parameters())
+        {
+            if (parameter.key().find(namePart) != std::string::npos)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void testTextEncoder()
     {
         models::TextEncoder encoder(12, 4, 8, 16, 2, 2, 3, 0.0);
@@ -185,6 +197,9 @@ namespace
         expectTrue(y.sizes() == torch::IntArrayRef({2, 1, 20}), "Generator output shape");
         expectTrue(torch::all(y <= 1.0).item<bool>(), "Generator tanh upper bound");
         expectTrue(torch::all(y >= -1.0).item<bool>(), "Generator tanh lower bound");
+        expectTrue(hasNamedParameter(*generator, "conv_pre.weight_v"), "Generator conv_pre uses weight norm");
+        expectTrue(hasNamedParameter(*generator, "ups_0.weight_v"), "Generator upsamplers use weight norm");
+        expectTrue(hasNamedParameter(*generator, "conv_post.weight_v"), "Generator conv_post uses weight norm");
     }
 
     void testGeneratorWithConditioning()
@@ -216,6 +231,7 @@ namespace
         expectTrue(result.first.size(0) == 2, "DiscriminatorS batch shape");
         expectTrue(result.first.dim() == 2, "DiscriminatorS flattened output rank");
         expectTrue(result.second.size() == 7, "DiscriminatorS feature map count");
+        expectTrue(hasNamedParameter(*discriminator, "convs_0.weight_v"), "DiscriminatorS convs use normalized weights");
     }
 
     void testDiscriminatorP()
@@ -228,6 +244,7 @@ namespace
         expectTrue(result.first.size(0) == 2, "DiscriminatorP batch shape");
         expectTrue(result.first.dim() == 2, "DiscriminatorP flattened output rank");
         expectTrue(result.second.size() == 6, "DiscriminatorP feature map count");
+        expectTrue(hasNamedParameter(*discriminator, "convs_0.weight_v"), "DiscriminatorP convs use normalized weights");
     }
 
     void testMultiPeriodDiscriminator()

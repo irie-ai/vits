@@ -1,4 +1,5 @@
 #include "data_utils.hpp"
+#include "text_processing.hpp"
 
 #include <torch/torch.h>
 
@@ -94,6 +95,15 @@ namespace
         expectTrue(plain.size(0) == 2, "textToTensor cleaned length");
         expectTrue(roundtrip.size(0) == 5, "textToTensor addBlank intersperses");
         expectTrue(roundtrip.index({0}).item<int64_t>() == 0, "textToTensor addBlank starts with blank");
+
+        const std::string ipaText = u8"həlˈoʊ";
+        const auto cleaned = data_utils::textToTensor(ipaText, {"english_cleaners2"}, true, false);
+        std::vector<int64_t> cleanedIds;
+        for (int64_t i = 0; i < cleaned.size(0); ++i)
+        {
+            cleanedIds.push_back(cleaned.index({i}).item<int64_t>());
+        }
+        expectTrue(text_processing::sequenceToText(cleanedIds) == ipaText, "textToTensor cleaned_text keeps IPA without cleaners");
     }
 
     void testGetAudioAndItems()

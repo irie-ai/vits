@@ -5,11 +5,98 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <utility>
+
+#include <torch/nn/functional/conv.h>
 
 namespace modules
 {
     namespace
     {
+        std::vector<int64_t> normDims(const torch::Tensor& tensor)
+        {
+            std::vector<int64_t> dims;
+            for (int64_t dim = 1; dim < tensor.dim(); ++dim)
+            {
+                dims.push_back(dim);
+            }
+            return dims;
+        }
+
+        torch::Tensor weightMagnitude(const torch::Tensor& weight)
+        {
+            return weight.pow(2.0).sum(normDims(weight), true).sqrt();
+        }
+
+        torch::Tensor applyWeightNorm(const torch::Tensor& weightV, const torch::Tensor& weightG)
+        {
+            return weightV * (weightG / torch::clamp_min(weightMagnitude(weightV), 1.0e-12));
+        }
+
+        torch::Tensor applySpectralNorm(const torch::Tensor& weight)
+        {
+            auto flat = weight.view({weight.size(0), -1});
+            auto u = torch::ones({1, flat.size(0)}, flat.options());
+            u = u / torch::clamp_min(u.norm(2, 1, true), 1.0e-12);
+            auto v = torch::matmul(u, flat);
+            v = v / torch::clamp_min(v.norm(2, 1, true), 1.0e-12);
+            u = torch::matmul(v, flat.transpose(0, 1));
+            u = u / torch::clamp_min(u.norm(2, 1, true), 1.0e-12);
+            const auto sigma = torch::matmul(torch::matmul(u, flat), v.transpose(0, 1));
+            return weight / torch::clamp_min(sigma, 1.0e-12);
+        }
+
+        torch::Tensor computeNormalizedWeight(
+            const torch::Tensor& weight,
+            const torch::Tensor& weightG,
+            NormType normType)
+        {
+            if (normType == NormType::Weight)
+            {
+                return applyWeightNorm(weight, weightG);
+            }
+            if (normType == NormType::Spectral)
+            {
+                return applySpectralNorm(weight);
+            }
+            return weight;
+        }
+
+        torch::Tensor makeWeight(const std::vector<int64_t>& shape)
+        {
+            auto weight = torch::empty(shape, torch::kFloat32);
+            torch::nn::init::kaiming_uniform_(weight, std::sqrt(5.0));
+            return weight;
+        }
+
+        int64_t calculateFanIn(const torch::Tensor& weight)
+        {
+            int64_t receptiveFieldSize = 1;
+            for (int64_t dim = 2; dim < weight.dim(); ++dim)
+            {
+                receptiveFieldSize *= weight.size(dim);
+            }
+            return weight.size(1) * receptiveFieldSize;
+        }
+
+        torch::Tensor makeBiasLikeConv(const torch::Tensor& weight, int64_t outChannels)
+        {
+            auto bias = torch::empty({outChannels}, torch::kFloat32);
+            const int64_t fanIn = calculateFanIn(weight);
+            const double bound = fanIn > 0 ? 1.0 / std::sqrt(static_cast<double>(fanIn)) : 0.0;
+            torch::nn::init::uniform_(bias, -bound, bound);
+            return bias;
+        }
+
+        void zeroModuleParameters(torch::nn::Module& module)
+        {
+            torch::NoGradGuard noGrad;
+            for (auto& parameter : module.parameters(/*recurse=*/false))
+            {
+                parameter.zero_();
+            }
+        }
+
         torch::nn::Conv1d makeConv1d(
             int64_t inChannels,
             int64_t outChannels,
@@ -21,10 +108,28 @@ namespace modules
                 .padding(commons::getPadding(kernelSize, dilation))
                 .dilation(dilation)
                 .groups(groups));
-            // TODO: Python applies init_weights to Conv modules. commons::initWeights(*conv)
-            // crashed with this Windows/LibTorch setup, so it is temporarily skipped.
-            // Restore safe initialization before supporting C++ training.
+            commons::initWeights(*conv);
             return conv;
+        }
+
+        NormalizedConv1d makeNormalizedConv1d(
+            int64_t inChannels,
+            int64_t outChannels,
+            int64_t kernelSize,
+            int64_t dilation = 1,
+            int64_t groups = 1,
+            NormType normType = NormType::Weight)
+        {
+            return NormalizedConv1d(
+                inChannels,
+                outChannels,
+                kernelSize,
+                1,
+                commons::getPadding(kernelSize, dilation),
+                dilation,
+                groups,
+                true,
+                normType);
         }
 
         torch::Tensor sumChannelsAndTime(const torch::Tensor& x)
@@ -143,6 +248,164 @@ namespace modules
         }
     }
 
+    NormalizedConv1dImpl::NormalizedConv1dImpl(
+        int64_t inChannels,
+        int64_t outChannels,
+        int64_t kernelSize,
+        int64_t stride,
+        int64_t padding,
+        int64_t dilation,
+        int64_t groups,
+        bool bias,
+        NormType normType)
+        : stride_(stride), padding_(padding), dilation_(dilation), groups_(groups), normType_(normType)
+    {
+        weight_ = register_parameter("weight_v", makeWeight({outChannels, inChannels / groups, kernelSize}));
+        weightG_ = register_parameter("weight_g", weightMagnitude(weight_).detach().clone());
+        if (bias)
+        {
+            bias_ = register_parameter("bias", makeBiasLikeConv(weight_, outChannels));
+        }
+    }
+
+    torch::Tensor NormalizedConv1dImpl::normalizedWeight()
+    {
+        return computeNormalizedWeight(weight_, weightG_, normType_);
+    }
+
+    void NormalizedConv1dImpl::initWeightNormal(double mean, double std)
+    {
+        torch::NoGradGuard noGrad;
+        weight_.normal_(mean, std);
+        if (normType_ == NormType::Weight)
+        {
+            weightG_.copy_(weightMagnitude(weight_));
+        }
+    }
+
+    torch::Tensor NormalizedConv1dImpl::forward(const torch::Tensor& x)
+    {
+        namespace F = torch::nn::functional;
+        return F::conv1d(
+            x,
+            normalizedWeight(),
+            F::Conv1dFuncOptions()
+                .bias(bias_.defined() ? bias_ : torch::Tensor())
+                .stride(stride_)
+                .padding(padding_)
+                .dilation(dilation_)
+                .groups(groups_));
+    }
+
+    NormalizedConvTranspose1dImpl::NormalizedConvTranspose1dImpl(
+        int64_t inChannels,
+        int64_t outChannels,
+        int64_t kernelSize,
+        int64_t stride,
+        int64_t padding,
+        int64_t outputPadding,
+        int64_t groups,
+        int64_t dilation,
+        bool bias,
+        NormType normType)
+        : stride_(stride),
+          padding_(padding),
+          outputPadding_(outputPadding),
+          groups_(groups),
+          dilation_(dilation),
+          normType_(normType)
+    {
+        weight_ = register_parameter("weight_v", makeWeight({inChannels, outChannels / groups, kernelSize}));
+        weightG_ = register_parameter("weight_g", weightMagnitude(weight_).detach().clone());
+        if (bias)
+        {
+            bias_ = register_parameter("bias", makeBiasLikeConv(weight_, outChannels));
+        }
+    }
+
+    torch::Tensor NormalizedConvTranspose1dImpl::normalizedWeight()
+    {
+        return computeNormalizedWeight(weight_, weightG_, normType_);
+    }
+
+    void NormalizedConvTranspose1dImpl::initWeightNormal(double mean, double std)
+    {
+        torch::NoGradGuard noGrad;
+        weight_.normal_(mean, std);
+        if (normType_ == NormType::Weight)
+        {
+            weightG_.copy_(weightMagnitude(weight_));
+        }
+    }
+
+    torch::Tensor NormalizedConvTranspose1dImpl::forward(const torch::Tensor& x)
+    {
+        namespace F = torch::nn::functional;
+        return F::conv_transpose1d(
+            x,
+            normalizedWeight(),
+            F::ConvTranspose1dFuncOptions()
+                .bias(bias_.defined() ? bias_ : torch::Tensor())
+                .stride(stride_)
+                .padding(padding_)
+                .output_padding(outputPadding_)
+                .groups(groups_)
+                .dilation(dilation_));
+    }
+
+    NormalizedConv2dImpl::NormalizedConv2dImpl(
+        int64_t inChannels,
+        int64_t outChannels,
+        std::vector<int64_t> kernelSize,
+        std::vector<int64_t> stride,
+        std::vector<int64_t> padding,
+        std::vector<int64_t> dilation,
+        int64_t groups,
+        bool bias,
+        NormType normType)
+        : stride_(std::move(stride)),
+          padding_(std::move(padding)),
+          dilation_(std::move(dilation)),
+          groups_(groups),
+          normType_(normType)
+    {
+        weight_ = register_parameter("weight_v", makeWeight({outChannels, inChannels / groups, kernelSize[0], kernelSize[1]}));
+        weightG_ = register_parameter("weight_g", weightMagnitude(weight_).detach().clone());
+        if (bias)
+        {
+            bias_ = register_parameter("bias", makeBiasLikeConv(weight_, outChannels));
+        }
+    }
+
+    torch::Tensor NormalizedConv2dImpl::normalizedWeight()
+    {
+        return computeNormalizedWeight(weight_, weightG_, normType_);
+    }
+
+    void NormalizedConv2dImpl::initWeightNormal(double mean, double std)
+    {
+        torch::NoGradGuard noGrad;
+        weight_.normal_(mean, std);
+        if (normType_ == NormType::Weight)
+        {
+            weightG_.copy_(weightMagnitude(weight_));
+        }
+    }
+
+    torch::Tensor NormalizedConv2dImpl::forward(const torch::Tensor& x)
+    {
+        namespace F = torch::nn::functional;
+        return F::conv2d(
+            x,
+            normalizedWeight(),
+            F::Conv2dFuncOptions()
+                .bias(bias_.defined() ? bias_ : torch::Tensor())
+                .stride(stride_)
+                .padding(padding_)
+                .dilation(dilation_)
+                .groups(groups_));
+    }
+
     LayerNormImpl::LayerNormImpl(int64_t channels, double eps)
         : channels_(channels), eps_(eps)
     {
@@ -166,22 +429,19 @@ namespace modules
         double pDropout)
     {
         dropout_ = torch::nn::Dropout(torch::nn::DropoutOptions(pDropout));
-        // TODO: Submodules should normally be registered with register_module.
-        // Manual registration segfaulted in this environment, so ModuleHolders
-        // are kept in vectors for now. Revisit before weight save/load support.
+        register_module("dropout", dropout_);
 
         for (int64_t i = 0; i < nLayers; ++i)
         {
             const int64_t inLayerChannels = i == 0 ? inChannels : hiddenChannels;
             auto conv = makeConv1d(inLayerChannels, hiddenChannels, kernelSize);
             auto norm = LayerNorm(hiddenChannels);
-            convLayers_.push_back(conv);
-            normLayers_.push_back(norm);
+            convLayers_.push_back(register_module("conv_layers_" + std::to_string(i), conv));
+            normLayers_.push_back(register_module("norm_layers_" + std::to_string(i), norm));
         }
 
-        proj_ = torch::nn::Conv1d(torch::nn::Conv1dOptions(hiddenChannels, outChannels, 1));
-        // TODO: Python zero-initializes proj.weight and proj.bias.
-        // data().zero_() crashed at runtime, so restore this with a safe no_grad path.
+        proj_ = register_module("proj", torch::nn::Conv1d(torch::nn::Conv1dOptions(hiddenChannels, outChannels, 1)));
+        zeroModuleParameters(*proj_);
     }
 
     torch::Tensor ConvReluNormImpl::forward(const torch::Tensor& x, const torch::Tensor& xMask)
@@ -204,20 +464,19 @@ namespace modules
     DDSConvImpl::DDSConvImpl(int64_t channels, int64_t kernelSize, int64_t nLayers, double pDropout)
     {
         dropout_ = torch::nn::Dropout(torch::nn::DropoutOptions(pDropout));
-        // TODO: conv/norm layers should be registered modules. Manual registration
-        // was unstable, so this keeps forward behavior testable first.
+        register_module("dropout", dropout_);
 
         for (int64_t i = 0; i < nLayers; ++i)
         {
             const int64_t dilation = static_cast<int64_t>(std::pow(kernelSize, i));
-            auto convSep = makeConv1d(channels, channels, kernelSize, dilation, channels);
-            auto conv1x1 = makeConv1d(channels, channels, 1);
+            auto convSep = makeNormalizedConv1d(channels, channels, kernelSize, dilation, channels);
+            auto conv1x1 = makeNormalizedConv1d(channels, channels, 1);
             auto norm1 = LayerNorm(channels);
             auto norm2 = LayerNorm(channels);
-            convSepLayers_.push_back(convSep);
-            conv1x1Layers_.push_back(conv1x1);
-            normLayers1_.push_back(norm1);
-            normLayers2_.push_back(norm2);
+            convSepLayers_.push_back(register_module("convs_sep_" + std::to_string(i), convSep));
+            conv1x1Layers_.push_back(register_module("convs_1x1_" + std::to_string(i), conv1x1));
+            normLayers1_.push_back(register_module("norms_1_" + std::to_string(i), norm1));
+            normLayers2_.push_back(register_module("norms_2_" + std::to_string(i), norm2));
         }
     }
 
@@ -257,23 +516,23 @@ namespace modules
         : hiddenChannels_(hiddenChannels), nLayers_(nLayers), ginChannels_(ginChannels)
     {
         dropout_ = torch::nn::Dropout(torch::nn::DropoutOptions(pDropout));
-        // TODO: in_layers/res_skip_layers/cond_layer should be registered modules.
-        // Restore registration when adding state_dict and weight_norm support.
+        register_module("dropout", dropout_);
 
         if (ginChannels_ != 0)
         {
-            condLayer_ = torch::nn::Conv1d(
-                torch::nn::Conv1dOptions(ginChannels_, 2 * hiddenChannels_ * nLayers_, 1));
+            condLayer_ = register_module(
+                "cond_layer",
+                torch::nn::Conv1d(torch::nn::Conv1dOptions(ginChannels_, 2 * hiddenChannels_ * nLayers_, 1)));
         }
 
         for (int64_t i = 0; i < nLayers_; ++i)
         {
             const int64_t dilation = static_cast<int64_t>(std::pow(dilationRate, i));
-            auto inLayer = makeConv1d(hiddenChannels_, 2 * hiddenChannels_, kernelSize, dilation);
+            auto inLayer = makeNormalizedConv1d(hiddenChannels_, 2 * hiddenChannels_, kernelSize, dilation);
             const int64_t resSkipChannels = i < nLayers_ - 1 ? 2 * hiddenChannels_ : hiddenChannels_;
-            auto resSkipLayer = makeConv1d(hiddenChannels_, resSkipChannels, 1);
-            inLayers_.push_back(inLayer);
-            resSkipLayers_.push_back(resSkipLayer);
+            auto resSkipLayer = makeNormalizedConv1d(hiddenChannels_, resSkipChannels, 1);
+            inLayers_.push_back(register_module("in_layers_" + std::to_string(i), inLayer));
+            resSkipLayers_.push_back(register_module("res_skip_layers_" + std::to_string(i), resSkipLayer));
         }
     }
 
@@ -345,16 +604,13 @@ namespace modules
     ResBlock1Impl::ResBlock1Impl(int64_t channels, int64_t kernelSize, const std::vector<int64_t>& dilation)
         : lreluSlope_(0.1)
     {
-        // TODO: Python ResBlock1 registers these convs with weight_norm.
-        // Current code skips weight_norm and manual registration; handle this
-        // before loading inference weights directly.
         for (const auto d : dilation)
         {
             const auto index = convs1_.size();
-            auto conv1 = makeConv1d(channels, channels, kernelSize, d);
-            auto conv2 = makeConv1d(channels, channels, kernelSize, 1);
-            convs1_.push_back(conv1);
-            convs2_.push_back(conv2);
+            auto conv1 = makeNormalizedConv1d(channels, channels, kernelSize, d);
+            auto conv2 = makeNormalizedConv1d(channels, channels, kernelSize, 1);
+            convs1_.push_back(register_module("convs1_" + std::to_string(index), conv1));
+            convs2_.push_back(register_module("convs2_" + std::to_string(index), conv2));
         }
     }
 
@@ -391,13 +647,11 @@ namespace modules
     ResBlock2Impl::ResBlock2Impl(int64_t channels, int64_t kernelSize, const std::vector<int64_t>& dilation)
         : lreluSlope_(0.1)
     {
-        // TODO: Python ResBlock2 registers these convs with weight_norm.
-        // Current code skips weight_norm and manual registration.
         for (const auto d : dilation)
         {
             const auto index = convs_.size();
-            auto conv = makeConv1d(channels, channels, kernelSize, d);
-            convs_.push_back(conv);
+            auto conv = makeNormalizedConv1d(channels, channels, kernelSize, d);
+            convs_.push_back(register_module("convs_" + std::to_string(index), conv));
         }
     }
 
@@ -482,15 +736,13 @@ namespace modules
             throw std::invalid_argument("ResidualCouplingLayer channels must be even.");
         }
 
-        pre_ = torch::nn::Conv1d(torch::nn::Conv1dOptions(halfChannels_, hiddenChannels, 1));
-        enc_ = WN(hiddenChannels, kernelSize, dilationRate, nLayers, ginChannels, pDropout);
-        post_ = torch::nn::Conv1d(torch::nn::Conv1dOptions(
+        pre_ = register_module("pre", torch::nn::Conv1d(torch::nn::Conv1dOptions(halfChannels_, hiddenChannels, 1)));
+        enc_ = register_module("enc", WN(hiddenChannels, kernelSize, dilationRate, nLayers, ginChannels, pDropout));
+        post_ = register_module("post", torch::nn::Conv1d(torch::nn::Conv1dOptions(
             hiddenChannels,
             halfChannels_ * (meanOnly_ ? 1 : 2),
-            1));
-        // TODO: Python zero-initializes post.weight/post.bias and registers
-        // pre/enc/post. zero_ and register_module were unstable here, so forward
-        // stability is prioritized for now.
+            1)));
+        zeroModuleParameters(*post_);
     }
 
     std::pair<torch::Tensor, torch::Tensor> ResidualCouplingLayerImpl::forward(
@@ -573,8 +825,7 @@ namespace modules
                 filterChannels_,
                 halfChannels_ * (numBins_ * 3 - 1),
                 1)));
-        // TODO: Python zero-initializes proj.weight/proj.bias. Keep default
-        // initialization until no_grad zeroing is verified across configurations.
+        zeroModuleParameters(*proj_);
     }
 
     std::pair<torch::Tensor, torch::Tensor> ConvFlowImpl::forward(

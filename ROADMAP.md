@@ -23,18 +23,18 @@
 | CMake           | ✅  | -   | 完了 |
 | commons         | ✅  | ✅   | 基本関数・mask・path・grad clip まで実装 |
 | utils           | 🟡  | ✅   | HParams/config/latest checkpoint/wav load-save/checkpoint save-load/plot tensor/file summary を実装。Python checkpoint 完全互換は未検証 |
-| text            | 🟡  | ✅   | symbols/cleaners/numbers の主要部を移植。IPA/phonemizer は保留 |
+| text            | 🟡  | ✅   | symbols/cleaners/numbers の主要部を移植。IPA symbols と optional espeak phonemizer に対応 |
 | data_utils      | 🟡  | ✅   | filelist/text/audio/spec cache/collate/bucket sampler を移植 |
 | monotonic_align | 🟡  | ✅   | CPU/LibTorch 版 maximum_path を実装。Cython/CUDA 相当の高速化は未着手 |
 | attentions      | 🟡  | ✅   | Encoder/Decoder/relative attention 実装。proximal init は保留 |
-| modules         | 🟡  | ✅   | flow/resblock/conv 系を実装。weight_norm 等は保留 |
+| modules         | 🟡  | ✅   | flow/resblock/conv 系を実装。内部 submodule 登録と主要 zero/init を反映。weight_norm 等は保留 |
 | models          | 🟡  | ✅   | TextEncoder から SynthesizerTrn まで主要構造を実装。重み互換は未完 |
 | losses          | ✅  | ✅   | generator/discriminator/feature/kl loss を実装 |
 | mel_processing  | ✅  | ✅   | spectrogram/mel/dynamic range 処理を実装 |
 | inference       | 🟡  | ✅   | config/text から SynthesizerTrn::infer へ接続する C++ ユーティリティを実装。実 checkpoint 推論は未検証 |
-| examples        | 🟡  | ✅   | hello/load_model/inference CLI を追加。vits_inference は wav 保存まで対応。実 checkpoint 推論は未検証 |
+| examples        | 🟡  | ✅   | hello/load_model/inference/LJSpeech smoke CLI を追加。実 checkpoint 推論と実データ学習実行は未検証 |
 | benchmark       | 🟡  | ✅   | ランダム重みの軽量 infer benchmark CLI を追加。実 checkpoint/GPU benchmark は未検証 |
-| training        | 🟡  | ✅   | 合成データで SynthesizerTrn + MultiPeriodDiscriminator の 1 step train を確認。実 dataset 学習は未検証 |
+| training        | 🟡  | ✅   | 合成データと LJSpeech で train step を確認。LJSpeech smoke CLI はmel loss、複数step/epoch、lr scheduler、checkpoint/config保存、学習後wav推論に対応 |
 | docs            | ⬜  | -   |    |
 
 ---
@@ -115,14 +115,14 @@ C++
 
 | 機能 | 実装 | テスト | 備考 |
 | -- | -- | --- | -- |
-| symbols / SPACE_ID | 🟡 | ✅ | ASCII と VITS 句読点は対応。IPA 全量は未対応 |
+| symbols / SPACE_ID | ✅ | ✅ | 本家 VITS の punctuation / letters / IPA symbols に対応 |
 | text_to_sequence | ✅ | ✅ | cleaner 適用と ID 化 |
 | cleaned_text_to_sequence | ✅ | ✅ | 既クリーニング文字列の ID 化 |
 | sequence_to_text | ✅ | ✅ | ID から文字列へ戻す |
 | basic_cleaners | ✅ | ✅ | lowercase + whitespace collapse |
 | transliteration_cleaners | 🟡 | ✅ | common accent の簡易 ASCII 化 |
-| english_cleaners | 🟡 | ✅ | 数値・略語展開まで。phonemizer は未接続 |
-| english_cleaners2 | 🟡 | ✅ | phonemizer hook のみ |
+| english_cleaners | ✅ | ✅ | lowercase、数値、略語、空白正規化。本家同様 phonemizer は使わない |
+| english_cleaners2 | 🟡 | ✅ | `VITS_ESPEAK_PATH` または PATH 上の `espeak-ng` / `espeak` があれば IPA 化。未導入時は正規化 text に fallback |
 | numbers.py | 🟡 | ✅ | cardinal/ordinal/decimal/currency を実装。inflect 完全互換は未検証 |
 
 ---
@@ -211,8 +211,7 @@ C++
 保留:
 
 * `weight_norm` / `spectral_norm`
-* 一部 submodule の完全な `register_module` 化
-* Python 初期化との厳密一致
+* Python weight norm 適用時の state_dict 完全互換
 
 ---
 
@@ -290,6 +289,7 @@ C++
 | hello_vits.cpp | ✅  |
 | inference.cpp  | ✅  |
 | load_model.cpp | 🟡  |
+| ljs_train_smoke.cpp | 🟡 |
 
 保留:
 
@@ -317,7 +317,12 @@ C++
 | 項目 | 状態 | テスト | 備考 |
 | -- | -- | --- | -- |
 | synthetic 1-step GAN smoke | ✅ | ✅ | 合成 text/spec/audio で generator/discriminator の forward/backward/AdamW step を確認 |
-| real dataset training loop | ⬜ | ⬜ | filelist/config/checkpoint/logging を接続した学習ループは未実装 |
+| LJSpeech multi-step smoke CLI | 🟡 | ✅ | `metadata.csv` と `wavs/*.wav` から batch を作り、generator/discriminator の train step を複数回実行する `ljs_train_smoke` を追加。`--steps` / `--epochs` / `--start-epoch` / `--log-interval` に対応 |
+| scheduler / epoch 管理 | 🟡 | ✅ | `batches_per_epoch` を計算し、epoch 境界で ExponentialLR 相当の `lr_decay` を G/D optimizer に適用。bucket sampler は epoch ごとに seed を変えて再生成 |
+| VITS mel loss | 🟡 | ✅ | real spec -> mel と generated audio -> mel spectrogram の L1 を `c_mel` 倍して generator loss に追加。波形L1は診断ログのみ |
+| train-after infer wav | 🟡 | ✅ | `--infer-output` / `--infer-text` / `--infer-max-length` で、学習直後の SynthesizerTrn からwav保存 |
+| checkpoint/config save | 🟡 | ✅ | `--save-model` / `--save-config` / `--save-optimizer` に対応。保存した model + config を `vits_inference` で再ロード推論確認済み |
+| real dataset training loop | ⬜ | ⬜ | 複数iteration、checkpoint、logging、eval を接続した継続学習ループは未実装 |
 | resume/eval/export loop | ⬜ | ⬜ | checkpoint resume、定期 eval、成果物 export は未実装 |
 
 ---
@@ -340,6 +345,7 @@ C++
 | test_training | ✅ |
 | example_hello_vits | ✅ |
 | vits_benchmark build/run | ✅ |
+| ljs_train_smoke build/run | ✅ |
 
 最終確認:
 

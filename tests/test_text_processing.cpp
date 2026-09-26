@@ -32,9 +32,33 @@ namespace
         expectTrue(
             text_processing::englishCleaners("Mr.\tSmith") == "mister smith",
             "englishCleaners lowercases and expands abbreviations");
-        expectTrue(
-            text_processing::englishCleaners2("Capt.  Jones") == "captain jones",
-            "englishCleaners2 is selectable");
+        const auto cleaned2 = text_processing::englishCleaners2("Capt.  Jones");
+        expectTrue(!cleaned2.empty(), "englishCleaners2 is selectable");
+        if (!text_processing::englishPhonemizerAvailable())
+        {
+            expectTrue(cleaned2 == "captain jones", "englishCleaners2 falls back without espeak");
+        }
+        else
+        {
+            const auto sequence = text_processing::cleanedTextToSequence(cleaned2);
+            expectTrue(!sequence.empty(), "englishCleaners2 phonemizer output maps to symbols");
+        }
+    }
+
+    void testPhonemizerDependency()
+    {
+        const auto available = text_processing::englishPhonemizerAvailable();
+        const auto output = text_processing::phonemizeEnglish("hello world");
+        expectTrue(!output.empty(), "phonemizeEnglish returns usable text");
+        if (!available)
+        {
+            expectTrue(output == "hello world", "phonemizeEnglish falls back when espeak is unavailable");
+        }
+        else
+        {
+            expectTrue(output != "hello world", "phonemizeEnglish uses espeak when available");
+            expectTrue(!text_processing::cleanedTextToSequence(output).empty(), "phonemizeEnglish output is symbol-compatible");
+        }
     }
 
     void testNumberExpansion()
@@ -65,6 +89,7 @@ namespace
         auto sequence = text_processing::cleanedTextToSequence(text);
         auto roundtrip = text_processing::sequenceToText(sequence);
         expectTrue(roundtrip == text, "cleanedTextToSequence roundtrip");
+        expectTrue(text_processing::symbols().size() > 150, "symbol table includes IPA symbols");
 
         const std::string vitsPunctuation =
             "\xC2\xA1\xC2\xBF"
@@ -73,6 +98,11 @@ namespace
             "\xE2\x80\x9C\xE2\x80\x9D";
         auto punctuationSequence = text_processing::cleanedTextToSequence(vitsPunctuation);
         expectTrue(punctuationSequence.size() == 8, "VITS punctuation symbols are mapped");
+
+        const std::string ipaText = u8"həlˈoʊ wɝld ᵻ ̩";
+        auto ipaSequence = text_processing::cleanedTextToSequence(ipaText);
+        auto ipaRoundtrip = text_processing::sequenceToText(ipaSequence);
+        expectTrue(ipaRoundtrip == ipaText, "cleanedTextToSequence keeps IPA symbols");
     }
 
     void testTextToSequence()
@@ -111,6 +141,7 @@ int main()
     {
         testCleaners();
         testEnglishCleaners();
+        testPhonemizerDependency();
         testNumberExpansion();
         testSequenceRoundtrip();
         testTextToSequence();

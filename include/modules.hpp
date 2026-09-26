@@ -8,6 +8,105 @@
 
 namespace modules
 {
+    enum class NormType
+    {
+        None,
+        Weight,
+        Spectral
+    };
+
+    class NormalizedConv1dImpl : public torch::nn::Module
+    {
+    public:
+        NormalizedConv1dImpl(
+            int64_t inChannels,
+            int64_t outChannels,
+            int64_t kernelSize,
+            int64_t stride = 1,
+            int64_t padding = 0,
+            int64_t dilation = 1,
+            int64_t groups = 1,
+            bool bias = true,
+            NormType normType = NormType::Weight);
+
+        torch::Tensor forward(const torch::Tensor& x);
+        torch::Tensor normalizedWeight();
+        void initWeightNormal(double mean = 0.0, double std = 0.01);
+
+    private:
+        torch::Tensor weight_;
+        torch::Tensor weightG_;
+        torch::Tensor bias_;
+        int64_t stride_;
+        int64_t padding_;
+        int64_t dilation_;
+        int64_t groups_;
+        NormType normType_;
+    };
+    TORCH_MODULE(NormalizedConv1d);
+
+    class NormalizedConvTranspose1dImpl : public torch::nn::Module
+    {
+    public:
+        NormalizedConvTranspose1dImpl(
+            int64_t inChannels,
+            int64_t outChannels,
+            int64_t kernelSize,
+            int64_t stride = 1,
+            int64_t padding = 0,
+            int64_t outputPadding = 0,
+            int64_t groups = 1,
+            int64_t dilation = 1,
+            bool bias = true,
+            NormType normType = NormType::Weight);
+
+        torch::Tensor forward(const torch::Tensor& x);
+        torch::Tensor normalizedWeight();
+        void initWeightNormal(double mean = 0.0, double std = 0.01);
+
+    private:
+        torch::Tensor weight_;
+        torch::Tensor weightG_;
+        torch::Tensor bias_;
+        int64_t stride_;
+        int64_t padding_;
+        int64_t outputPadding_;
+        int64_t groups_;
+        int64_t dilation_;
+        NormType normType_;
+    };
+    TORCH_MODULE(NormalizedConvTranspose1d);
+
+    class NormalizedConv2dImpl : public torch::nn::Module
+    {
+    public:
+        NormalizedConv2dImpl(
+            int64_t inChannels,
+            int64_t outChannels,
+            std::vector<int64_t> kernelSize,
+            std::vector<int64_t> stride,
+            std::vector<int64_t> padding,
+            std::vector<int64_t> dilation = {1, 1},
+            int64_t groups = 1,
+            bool bias = true,
+            NormType normType = NormType::Weight);
+
+        torch::Tensor forward(const torch::Tensor& x);
+        torch::Tensor normalizedWeight();
+        void initWeightNormal(double mean = 0.0, double std = 0.01);
+
+    private:
+        torch::Tensor weight_;
+        torch::Tensor weightG_;
+        torch::Tensor bias_;
+        std::vector<int64_t> stride_;
+        std::vector<int64_t> padding_;
+        std::vector<int64_t> dilation_;
+        int64_t groups_;
+        NormType normType_;
+    };
+    TORCH_MODULE(NormalizedConv2d);
+
     class LayerNormImpl : public torch::nn::Module
     {
     public:
@@ -58,8 +157,8 @@ namespace modules
             const c10::optional<torch::Tensor>& g = c10::nullopt);
 
     private:
-        std::vector<torch::nn::Conv1d> convSepLayers_;
-        std::vector<torch::nn::Conv1d> conv1x1Layers_;
+        std::vector<NormalizedConv1d> convSepLayers_;
+        std::vector<NormalizedConv1d> conv1x1Layers_;
         std::vector<LayerNorm> normLayers1_;
         std::vector<LayerNorm> normLayers2_;
         torch::nn::Dropout dropout_{nullptr};
@@ -89,8 +188,8 @@ namespace modules
         int64_t hiddenChannels_;
         int64_t nLayers_;
         int64_t ginChannels_;
-        std::vector<torch::nn::Conv1d> inLayers_;
-        std::vector<torch::nn::Conv1d> resSkipLayers_;
+        std::vector<NormalizedConv1d> inLayers_;
+        std::vector<NormalizedConv1d> resSkipLayers_;
         torch::nn::Conv1d condLayer_{nullptr};
         torch::nn::Dropout dropout_{nullptr};
     };
@@ -112,8 +211,8 @@ namespace modules
 
     private:
         double lreluSlope_;
-        std::vector<torch::nn::Conv1d> convs1_;
-        std::vector<torch::nn::Conv1d> convs2_;
+        std::vector<NormalizedConv1d> convs1_;
+        std::vector<NormalizedConv1d> convs2_;
     };
     TORCH_MODULE(ResBlock1);
 
@@ -133,7 +232,7 @@ namespace modules
 
     private:
         double lreluSlope_;
-        std::vector<torch::nn::Conv1d> convs_;
+        std::vector<NormalizedConv1d> convs_;
     };
     TORCH_MODULE(ResBlock2);
 

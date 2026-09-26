@@ -37,6 +37,10 @@ add_library(vits_core
 target_include_directories(vits_core PUBLIC
     include)
 
+if(MSVC)
+    target_compile_options(vits_core PUBLIC /utf-8)
+endif()
+
 # LibTorchライブラリをリンクする
 # これを書かないとtorch::Tensorなどが使えない
 target_link_libraries(vits_core PUBLIC "${TORCH_LIBRARIES}")
@@ -71,6 +75,11 @@ add_executable(vits_benchmark
     "examples/benchmark.cpp")
 
 target_link_libraries(vits_benchmark PRIVATE vits_core)
+
+add_executable(ljs_train_smoke
+    "examples/ljs_train_smoke.cpp")
+
+target_link_libraries(ljs_train_smoke PRIVATE vits_core)
 
 add_executable(test_commons
     "tests/test_commons.cpp")
@@ -215,6 +224,14 @@ if(MSVC)
             -E copy_if_different
             ${TORCH_DLLS}
             $<TARGET_FILE_DIR:vits_benchmark>
+    )
+
+    add_custom_command(TARGET ljs_train_smoke
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -E copy_if_different
+            ${TORCH_DLLS}
+            $<TARGET_FILE_DIR:ljs_train_smoke>
     )
 
     add_custom_command(TARGET test_modules

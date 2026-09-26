@@ -665,6 +665,12 @@ namespace utils
         double learningRate,
         const torch::optim::Optimizer* optimizer)
     {
+        const auto outputPath = std::filesystem::path(checkpointPath);
+        if (!outputPath.parent_path().empty())
+        {
+            std::filesystem::create_directories(outputPath.parent_path());
+        }
+
         torch::serialize::OutputArchive archive;
 
         torch::serialize::OutputArchive modelArchive;

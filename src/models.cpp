@@ -489,7 +489,16 @@ namespace models
 
         convPre_ = register_module(
             "conv_pre",
-            torch::nn::Conv1d(torch::nn::Conv1dOptions(initialChannel_, upsampleInitialChannel_, 7).padding(3)));
+            modules::NormalizedConv1d(
+                initialChannel_,
+                upsampleInitialChannel_,
+                7,
+                1,
+                3,
+                1,
+                1,
+                true,
+                modules::NormType::Weight));
 
         ups_.reserve(numUpsamples_);
         resblocks1_.reserve(numUpsamples_ * numKernels_);
@@ -501,11 +510,18 @@ namespace models
             const int64_t outChannels = upsampleInitialChannel_ / (1LL << (i + 1));
             const int64_t kernelSize = upsampleKernelSizes_[i];
             const int64_t stride = upsampleRates_[i];
-            auto up = torch::nn::ConvTranspose1d(torch::nn::ConvTranspose1dOptions(inChannels, outChannels, kernelSize)
-                                                     .stride(stride)
-                                                     .padding((kernelSize - stride) / 2));
-            // TODO: Python applies weight_norm and init_weights to upsamplers.
-            // Weight norm is not ported yet, so this keeps forward behavior first.
+            auto up = modules::NormalizedConvTranspose1d(
+                inChannels,
+                outChannels,
+                kernelSize,
+                stride,
+                (kernelSize - stride) / 2,
+                0,
+                1,
+                1,
+                true,
+                modules::NormType::Weight);
+            up->initWeightNormal();
             ups_.push_back(register_module("ups_" + std::to_string(i), up));
 
             for (int64_t j = 0; j < numKernels_; ++j)
@@ -527,7 +543,16 @@ namespace models
         const int64_t postChannels = upsampleInitialChannel_ / (1LL << numUpsamples_);
         convPost_ = register_module(
             "conv_post",
-            torch::nn::Conv1d(torch::nn::Conv1dOptions(postChannels, 1, 7).padding(3).bias(false)));
+            modules::NormalizedConv1d(
+                postChannels,
+                1,
+                7,
+                1,
+                3,
+                1,
+                1,
+                false,
+                modules::NormType::Weight));
 
         if (ginChannels_ != 0)
         {
@@ -595,8 +620,7 @@ namespace models
           stride_(stride),
           useSpectralNorm_(useSpectralNorm)
     {
-        // TODO: Python wraps these convs with weight_norm or spectral_norm.
-        // Norm wrappers are not ported yet, so keep the discriminator topology first.
+        const auto normType = useSpectralNorm_ ? modules::NormType::Spectral : modules::NormType::Weight;
         const int64_t pad = commons::getPadding(kernelSize_, 1);
         const std::vector<std::pair<int64_t, int64_t>> channels = {
             {1, 32},
@@ -610,16 +634,31 @@ namespace models
         for (size_t i = 0; i < channels.size(); ++i)
         {
             const bool last = i + 1 == channels.size();
-            auto conv = torch::nn::Conv2d(
-                torch::nn::Conv2dOptions(channels[i].first, channels[i].second, {kernelSize_, 1})
-                    .stride(last ? std::vector<int64_t>{1, 1} : std::vector<int64_t>{stride_, 1})
-                    .padding({pad, 0}));
+            auto conv = modules::NormalizedConv2d(
+                channels[i].first,
+                channels[i].second,
+                std::vector<int64_t>{kernelSize_, 1},
+                last ? std::vector<int64_t>{1, 1} : std::vector<int64_t>{stride_, 1},
+                std::vector<int64_t>{pad, 0},
+                std::vector<int64_t>{1, 1},
+                1,
+                true,
+                normType);
             convs_.push_back(register_module("convs_" + std::to_string(i), conv));
         }
 
         convPost_ = register_module(
             "conv_post",
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(1024, 1, {3, 1}).padding({1, 0})));
+            modules::NormalizedConv2d(
+                1024,
+                1,
+                std::vector<int64_t>{3, 1},
+                std::vector<int64_t>{1, 1},
+                std::vector<int64_t>{1, 0},
+                std::vector<int64_t>{1, 1},
+                1,
+                true,
+                normType));
     }
 
     DiscriminatorOutput DiscriminatorPImpl::forward(const torch::Tensor& x)
@@ -653,8 +692,7 @@ namespace models
     DiscriminatorSImpl::DiscriminatorSImpl(bool useSpectralNorm)
         : useSpectralNorm_(useSpectralNorm)
     {
-        // TODO: Python wraps these convs with weight_norm or spectral_norm.
-        // Norm wrappers are not ported yet, so keep the discriminator topology first.
+        const auto normType = useSpectralNorm_ ? modules::NormType::Spectral : modules::NormType::Weight;
         struct ConvSpec
         {
             int64_t inChannels;
@@ -677,17 +715,22 @@ namespace models
         for (size_t i = 0; i < specs.size(); ++i)
         {
             const auto& spec = specs[i];
-            auto conv = torch::nn::Conv1d(
-                torch::nn::Conv1dOptions(spec.inChannels, spec.outChannels, spec.kernelSize)
-                    .stride(spec.stride)
-                    .groups(spec.groups)
-                    .padding(spec.padding));
+            auto conv = modules::NormalizedConv1d(
+                spec.inChannels,
+                spec.outChannels,
+                spec.kernelSize,
+                spec.stride,
+                spec.padding,
+                1,
+                spec.groups,
+                true,
+                normType);
             convs_.push_back(register_module("convs_" + std::to_string(i), conv));
         }
 
         convPost_ = register_module(
             "conv_post",
-            torch::nn::Conv1d(torch::nn::Conv1dOptions(1024, 1, 3).padding(1)));
+            modules::NormalizedConv1d(1024, 1, 3, 1, 1, 1, 1, true, normType));
     }
 
     DiscriminatorOutput DiscriminatorSImpl::forward(const torch::Tensor& x)

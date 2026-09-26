@@ -74,6 +74,15 @@ namespace
 
         auto loss = losses::klLoss(zP, logsQ, mP, logsP, mask);
         expectTrue(torch::allclose(loss, torch::tensor(0.0)), "klLoss matches expected value");
+
+        zP = torch::tensor({{{2.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}}});
+        logsQ = torch::zeros({1, 2, 3});
+        mP = torch::zeros({1, 2, 3});
+        logsP = torch::zeros({1, 2, 3});
+        mask = torch::tensor({{{1.0f, 0.0f, 1.0f}}});
+
+        loss = losses::klLoss(zP, logsQ, mP, logsP, mask);
+        expectTrue(torch::allclose(loss, torch::tensor(0.25f)), "klLoss applies mask and normalizes by valid timesteps");
     }
 }
 
